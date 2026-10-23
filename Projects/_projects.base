@@ -13,7 +13,7 @@ views:
       - leads
     sort:
       - property: priority
-        direction: DESC
+        direction: ASC
     columnSize:
       file.name: 265
       note.status: 132
