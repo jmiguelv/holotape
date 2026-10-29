@@ -1,5 +1,4 @@
 import copy
-import os
 import stat
 import sys
 import tempfile
@@ -112,6 +111,41 @@ class PlanTests(unittest.TestCase):
             self.assertNotIn('EXAMPLE_ONLY', str(plan))
             self.assertNotIn('Related%20task.md', str(plan['blocks']))
             self.assertTrue(plan['document']['warnings'])
+
+    def test_forbidden_terms_in_actions_are_checked_too(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Example.md'
+            path.write_text('# Example\n\n- [ ] restricted-label')
+            with self.assertRaises(ValueError):
+                migration.build_plan({'source': str(path), 'task': ID, 'forbid_words': ['restricted-label']})
+
+    def test_api_rich_text_limit_is_checked_before_mutation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Example.md'
+            path.write_text('# Example\n\n```python\n' + 'x' * 190001 + '\n```')
+            with self.assertRaises(ValueError):
+                migration.build_plan({'source': str(path), 'task': ID})
+
+    def test_changed_plan_is_not_silently_reported_as_already_imported(self):
+        class NoRequests:
+            workspace = ID
+            def page(self, value):
+                raise AssertionError('No API request is allowed')
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Example.md'
+            path.write_text('# Example')
+            job = {'source': str(path), 'task': ID}
+            plan = migration.build_plan(job)
+            state = {'schema': migration.STATE_SCHEMA, 'task': ID, 'workspace': ID,
+                     'source_sha256': plan['source_sha256'], 'plan_fingerprint': 'different', 'verified': True}
+            state_path = Path(folder) / 'state.json'
+            migration.save_state(state_path, state)
+            with self.assertRaises(ValueError):
+                migration.migrate(NoRequests(), job, state_path)
+
+    def test_title_mentions_do_not_require_a_text_field(self):
+        page = {'properties': {'Name': {'type': 'title', 'title': [{'plain_text': 'Today', 'type': 'mention', 'mention': {}}]}}}
+        self.assertEqual(migration.source_title(page), 'Today')
 
     def test_live_user_content_is_refused_before_any_write(self):
         class ReadOnlyClient:
