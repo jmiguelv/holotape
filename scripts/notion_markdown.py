@@ -78,8 +78,9 @@ def parse_aside(lines):
         parser.feed(image.group())
         parser.close()
         url = urlsplit(parser.src or '')
-        if url.scheme != 'https' or not url.netloc:
-            raise ValueError('Callout icon requires an HTTPS URL or a separate file upload')
+        if (url.scheme != 'https' or url.hostname not in ('app.notion.com', 'www.notion.so')
+                or not url.path.startswith('/icons/') or url.username or url.password):
+            raise ValueError('Callout icon must use a standard Notion icon URL; upload custom icons separately')
         icon = {'type': 'external', 'external': {'url': parser.src}}
         value = value[image.end():].strip()
     elif value:
@@ -97,7 +98,7 @@ def date_heading(value):
         obj['end'] = dates[1]
     return {'object': 'block', 'type': 'heading_3', 'heading_3': {'rich_text': [{'type': 'mention', 'mention': {'type': 'date', 'date': obj}}]}}
 
-def render(markdown):
+def render(markdown, source_file=None):
     lines = markdown.splitlines()
     result = []
     stack = []
@@ -111,7 +112,10 @@ def render(markdown):
             continue
         if stripped.startswith('```'):
             language = stripped[3:].strip() or 'plain text'
-            assert language in ('json', 'bash', 'mermaid', 'plain text')
+            if language in ('text', 'txt', 'plaintext'):
+                language = 'plain text'
+            if language not in ('json', 'bash', 'python', 'mermaid', 'plain text'):
+                raise ValueError('Unsupported code language: ' + language)
             content = []
             while i < len(lines) and not re.fullmatch(r'\s*```\s*', lines[i]):
                 content.append(lines[i][indent:] if lines[i].startswith(' ' * indent) else lines[i])
@@ -130,9 +134,12 @@ def render(markdown):
         elif stripped.startswith('!['):
             image = re.fullmatch(r'!\[([^\]]+)\]\(([^)]+)\)', stripped)
             assert image
-            filename = Path(unquote(image[2])).name
-            assert (FILE.parent / unquote(image[2])).is_file()
-            b = {'object': 'block', 'type': 'image', 'image': {'_filename': filename, 'caption': rich(image[1])}}
+            safe_asset(source_file, image[2])
+            b = {'object': 'block', 'type': 'image', 'image': {'_asset': image[2], 'caption': rich(image[1])}}
+        elif re.fullmatch(r'\[[^\]]+\]\([^)]+\.txt\)', stripped):
+            attached = re.fullmatch(r'\[([^\]]+)\]\(([^)]+)\)', stripped)
+            safe_asset(source_file, attached[2])
+            b = {'object': 'block', 'type': 'file', 'file': {'_asset': attached[2], 'caption': rich(attached[1])}}
         elif stripped.startswith('|'):
             entries = [stripped]
             while i < len(lines) and (lines[i].strip().startswith('|') or not entries[-1].endswith('|')):
@@ -217,3 +224,122 @@ def rich_signature(items):
         else:
             normalised.append(item)
     return normalised
+
+
+CREDENTIAL_LINE = re.compile(r'^\s*(?:password|passwd|api[_ -]?key|access[_ -]?token|authorization)\s*[:=]\s*\S+', re.I)
+PROTECTED_URL = re.compile(r'dropbox\.com/sm/password|rlkey(?:=|%3d)|[?&](?:access_token|password|token)=', re.I)
+DATE_LINE = re.compile(r'^(?:#{1,6}\s*)?(?:<u>)?(\d{1,2} [A-Za-z]+ \d{4}(?:,\s*\d{1,2} [A-Za-z]+ \d{4})?)(?:</u>)?\s*$')
+METADATA_KEYS = {'Assignee', 'Person', 'Status', 'Priority', 'Date started', 'Part of', 'Key deliverables'}
+
+
+def sanitise_source(value):
+    """Omit explicit credential lines and protected links without logging values."""
+    result, warnings = [], []
+    for number, line in enumerate(value.splitlines(), 1):
+        if CREDENTIAL_LINE.search(line) or PROTECTED_URL.search(line):
+            warnings.append('Credential material omitted at source line ' + str(number))
+            notice = '[Credential-bearing download details omitted; use the original secure channel.]'
+            if not result or result[-1] != notice:
+                result.append(notice)
+        else:
+            result.append(line)
+    return '\n'.join(result), warnings
+
+
+def safe_asset(source_file, reference):
+    """Resolve only existing files beneath the selected export's directory."""
+    if source_file is None:
+        raise ValueError('A source file is required for local attachments')
+    decoded = unquote(reference)
+    relative = Path(decoded)
+    if relative.is_absolute() or '..' in relative.parts or urlsplit(decoded).scheme:
+        raise ValueError('Attachment must stay beneath the export directory')
+    root = Path(source_file).resolve().parent
+    target = (root / relative).resolve()
+    if not target.is_relative_to(root) or target == root or not target.is_file():
+        raise ValueError('Attachment is missing or escapes the export directory')
+    return target
+
+
+def prepare_export(source):
+    """Separate source metadata, explicit checkbox actions, context and dated notes.
+
+    Dates in action prose are not completion dates. Only absolute dates introduced
+    by 'by' become historical deadlines. Relative dates remain unresolved.
+    """
+    clean, warnings = sanitise_source(source)
+    lines = clean.splitlines()
+    if not lines or not lines[0].startswith('# '):
+        raise ValueError('Expected a Markdown export with a title heading')
+    title = lines[0][2:].strip()
+    index = 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    metadata = {}
+    while index < len(lines):
+        key, separator, value = lines[index].partition(':')
+        if not separator or key not in METADATA_KEYS:
+            break
+        metadata[key] = value.strip()
+        index += 1
+    context, log, actions, stack = [], [], [], []
+    target = context
+    fenced = False
+    source_date = None
+    body = lines[index:]
+    for number, line in enumerate(body):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if stripped.startswith('```'):
+            fenced = not fenced
+            target.append(line)
+            continue
+        if fenced:
+            target.append(line)
+            continue
+        dated = DATE_LINE.fullmatch(stripped)
+        if dated:
+            # Validate instead of turning malformed dates into misleading headings.
+            date_heading(dated[1])
+            source_date = dated[1]
+            target = log
+            target.append('## ' + source_date)
+            stack = []
+            continue
+        if stripped == '@Today':
+            source_date = None
+            target = log
+            target.append('### Undated source update (@Today)')
+            stack = []
+            continue
+        action = re.fullmatch(r'\s*[-*] \[([ xX])\]\s+(.*)', line)
+        if action:
+            original = action[2]
+            if '@who' in original and '[what]' in original:
+                continue
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            deadline = re.search(r'\bby (\d{1,2} [A-Za-z]+ \d{4})\b', original)
+            due = None
+            if deadline:
+                due = datetime.datetime.strptime(deadline[1], '%d %B %Y').date().isoformat()
+            actions.append({'original': original, 'done': action[1].lower() == 'x',
+                            'parent': stack[-1][1] if stack else None,
+                            'due': due, 'source_date': source_date})
+            stack.append((indent, len(actions) - 1))
+            following = next((x for x in body[number + 1:] if x.strip()), '')
+            next_indent = len(following) - len(following.lstrip())
+            if next_indent > indent and not re.match(r'\s*[-*] \[[ xX]\]', following):
+                target.append('Source action (as recorded): ' + original)
+            continue
+        if stripped and stack and indent <= stack[-1][0]:
+            stack = []
+        if stripped in ('## Actions', 'Todo:', '- Completed', 'Completed:') or stripped.startswith('*Keep action items visible'):
+            continue
+        if stripped.startswith('## ') and target is log:
+            target = context
+        target.append(line)
+    if fenced:
+        raise ValueError('Unclosed code fence in export')
+    return {'title': title, 'metadata': metadata, 'context': '\n'.join(context).strip(),
+            'log': '\n'.join(log).strip(), 'actions': actions, 'warnings': warnings}
