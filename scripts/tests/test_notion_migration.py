@@ -36,6 +36,10 @@ class MarkdownTests(unittest.TestCase):
         self.assertEqual(nodes[0]['numbered_list_item']['children'][0]['type'], 'bulleted_list_item')
         self.assertEqual(nodes[-1]['code']['language'], 'mermaid')
 
+    def test_star_bullets_are_not_consumed_as_italic_prose(self):
+        nodes = md.render('Match the labels:\n* First region\n* Second region')
+        self.assertEqual([b['type'] for b in nodes], ['paragraph', 'bulleted_list_item', 'bulleted_list_item'])
+
     def test_multiline_table_cells(self):
         b = md.render('| A | B |\n| --- | --- |\n| one,\ntwo | first\n\nsecond |')[0]
         row = b['table']['children'][1]['table_row']['cells']

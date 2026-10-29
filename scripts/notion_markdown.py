@@ -168,8 +168,8 @@ def render(markdown, source_file=None):
             level = len(stripped) - len(stripped.lstrip('#'))
             b = block('heading_3' if level >= 3 else 'heading_2', stripped.lstrip('#').strip())
             stack = []
-        elif stripped.startswith('- ') or re.match(r'^\d+\. ', stripped):
-            assert not re.match(r'^- \[[ xX]\]', stripped), 'Actions must not be rendered as checklist blocks.'
+        elif stripped.startswith(('- ', '* ')) or re.match(r'^\d+\. ', stripped):
+            assert not re.match(r'^[-*] \[[ xX]\]', stripped), 'Actions must not be rendered as checklist blocks.'
             numbered = re.match(r'^\d+\. (.*)', stripped)
             kind = 'numbered_list_item' if numbered else 'bulleted_list_item'
             b = block(kind, numbered[1] if numbered else stripped[2:])
@@ -184,7 +184,7 @@ def render(markdown, source_file=None):
             continue
         else:
             content = [stripped]
-            while i < len(lines) and lines[i].strip() and not re.match(r'^\s*(?:#|\||- |!\[|```|<aside>|---|\d+\. )', lines[i]):
+            while i < len(lines) and lines[i].strip() and not re.match(r'^\s*(?:#|\||[-*] |!\[|```|<aside>|---|\d+\. )', lines[i]):
                 content.append(lines[i].strip())
                 i += 1
             b = block('paragraph', '\n'.join(content))
