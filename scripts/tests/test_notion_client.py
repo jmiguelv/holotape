@@ -93,5 +93,41 @@ class AppendTests(unittest.TestCase):
         self.assertEqual(len(client.children(direct[0]['id'])), 1)
 
 
+class PlanTests(unittest.TestCase):
+    def test_empty_export_has_three_sections_without_invented_progress(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Example.md'
+            path.write_text('# Example\n\nStatus: Not started')
+            plan = migration.build_plan({'source': str(path), 'task': ID})
+            headings = [b['heading_2']['rich_text'][0]['text']['content'] for b in plan['blocks'] if b['type'] == 'heading_2']
+            self.assertEqual(headings, ['Purpose and outcome', 'Context and resources', 'Work log'])
+            self.assertEqual(plan['document']['actions'], [])
+            self.assertNotIn('Completed', str(plan['blocks']))
+
+    def test_link_mapping_and_redaction_happen_before_a_plan_is_saved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Example.md'
+            path.write_text('# Example\n\n8 October 2026\n\n[Related](Related%20task.md)\npassword: EXAMPLE_ONLY')
+            plan = migration.build_plan({'source': str(path), 'task': ID, 'links': {'Related%20task.md': 'https://example.com/task'}})
+            self.assertNotIn('EXAMPLE_ONLY', str(plan))
+            self.assertNotIn('Related%20task.md', str(plan['blocks']))
+            self.assertTrue(plan['document']['warnings'])
+
+    def test_live_user_content_is_refused_before_any_write(self):
+        class ReadOnlyClient:
+            workspace = ID
+            def page(self, value):
+                return {'id': ID, 'properties': {}, 'in_trash': False}
+            def children(self, value):
+                return [{'type': 'paragraph', 'paragraph': {'rich_text': []}}]
+            def request(self, *args, **kwargs):
+                raise AssertionError('No mutation is allowed')
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Example.md'
+            path.write_text('# Example')
+            with self.assertRaises(ValueError):
+                migration.migrate(ReadOnlyClient(), {'source': str(path), 'task': ID}, Path(folder) / 'state.json')
+
+
 if __name__ == '__main__':
     unittest.main()
