@@ -4,7 +4,6 @@ Python 3.9+; standard library only. Export content and credentials are not bundl
 Native comment threads are not part of Markdown exports.
 """
 
-import copy
 import datetime
 import re
 import unicodedata

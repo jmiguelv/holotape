@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import notion_migrate as migration
@@ -13,6 +14,16 @@ ID = '11111111-1111-4111-8111-111111111111'
 
 
 class SafetyTests(unittest.TestCase):
+    def test_json_uses_stdin_instead_of_shell_argument_size_limits(self):
+        class Response:
+            returncode = 0
+            stdout = '{}'
+        with patch('notion_migrate.subprocess.run', return_value=Response()) as run:
+            migration.NotionClient(ID).request('POST', '/v1/pages', {'text': 'example'})
+        args, options = run.call_args
+        self.assertIn('@-', args[0])
+        self.assertEqual(options['input'], '{"text": "example"}')
+
     def test_ids_are_validated_before_becoming_api_paths(self):
         self.assertEqual(migration.validate_id(ID.replace('-', '')), ID)
         with self.assertRaises(ValueError):
@@ -123,6 +134,13 @@ class PlanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / 'Example.md'
             path.write_text('# Example\n\n```python\n' + 'x' * 190001 + '\n```')
+            with self.assertRaises(ValueError):
+                migration.build_plan({'source': str(path), 'task': ID})
+
+    def test_more_than_25_root_actions_requires_explicit_reconciliation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'Example.md'
+            path.write_text('# Example\n\n' + '\n'.join('- [ ] Action ' + str(i) for i in range(26)))
             with self.assertRaises(ValueError):
                 migration.build_plan({'source': str(path), 'task': ID})
 

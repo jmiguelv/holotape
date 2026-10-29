@@ -39,7 +39,7 @@ def check_state_path(path):
 
 def save_state(path, state):
     path = check_state_path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.NamedTemporaryFile('w', dir=path.parent, prefix='.notion-state-', delete=False) as stream:
         temporary = Path(stream.name)
         json.dump(state, stream, indent=2)
@@ -104,11 +104,14 @@ class NotionClient:
 
     def request(self, method, path, body=None, extra=()):
         args = ['ntn', 'api', '-X', method, path, *extra]
-        if body is not None:
-            args += ['-d', json.dumps(body)]
+        payload = json.dumps(body) if body is not None else None
+        if payload is not None:
+            args += ['-d', '@-']
         env = os.environ.copy()
         env['NOTION_WORKSPACE_ID'] = self.workspace
-        result = subprocess.run(args, env=env, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(args, env=env, input=payload,
+                                stdin=subprocess.DEVNULL if payload is None else None,
+                                capture_output=True, text=True, timeout=120)
         if result.returncode:
             error, _ = md.sanitise_source(result.stderr)
             raise RuntimeError(method + ' ' + path + ': ' + error.strip())
@@ -201,7 +204,7 @@ class NotionClient:
 
 
 def source_title(page):
-    return ''.join(x.get('plain_text', x['text']['content']) for prop in page['properties'].values()
+    return ''.join(x.get('plain_text', x.get('text', {}).get('content', '')) for prop in page['properties'].values()
                    if prop['type'] == 'title' for x in prop['title'])
 
 
@@ -262,19 +265,34 @@ def build_plan(job):
         action['title'] = titles[index] if titles else ''.join(x['text']['content'] for x in md.rich(action['original']))
         if re.search(r'\bby today\b', action['original'], re.I):
             document['warnings'].append('Relative deadline left unresolved for source action ' + str(index + 1))
+    if sum(a['parent'] is None for a in document['actions']) > 25:
+        raise ValueError('More than 25 root actions requires relation-property pagination/reconciliation')
+    assets = {}
     for b in md.walk(blocks):
-        if '_asset' in b[b['type']]:
-            validate_media(md.safe_asset(path, b[b['type']]['_asset']))
-        for item in b[b['type']].get('rich_text', []):
+        body = b[b['type']]
+        if len(body.get('children', [])) > 100:
+            raise ValueError('Split source sections with more than 100 immediate child blocks')
+        rich_arrays = [body.get('rich_text', []), body.get('caption', []), *body.get('cells', [])]
+        if any(len(items) > 100 for items in rich_arrays):
+            raise ValueError('Split source text exceeding the API rich-text array limit')
+        if '_asset' in body:
+            asset = md.safe_asset(path, body['_asset'])
+            validate_media(asset)
+            assets[body['_asset']] = hashlib.sha256(asset.read_bytes()).hexdigest()
+        for item in body.get('rich_text', []):
             link = (item.get('text', {}).get('link') or {}).get('url')
             if link and (urlsplit(link).scheme not in ('http', 'https') or not urlsplit(link).netloc or urlsplit(link).username):
                 raise ValueError('Unresolved or unsafe link; supply an explicit link mapping')
-    serialised = json.dumps(blocks, ensure_ascii=False)
+    serialised = json.dumps({'blocks': blocks, 'actions': document['actions']}, ensure_ascii=False)
     for forbidden in job.get('forbid_words', []):
         if forbidden.casefold() in serialised.casefold():
             raise ValueError('Forbidden workspace terminology remains in the plan')
-    return {'source': str(path), 'task': task_id, 'source_sha256': hashlib.sha256(raw.encode()).hexdigest(),
-            'document': document, 'blocks': blocks, 'source_url': source_url}
+    source_hash = hashlib.sha256(raw.encode()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps({'source': source_hash, 'task': task_id, 'purpose': purpose,
+        'links': links, 'terms': job.get('terms', {}), 'forbid_words': job.get('forbid_words', []),
+        'action_titles': titles, 'source_url': source_url, 'assets': assets}, sort_keys=True).encode()).hexdigest()
+    return {'source': str(path), 'task': task_id, 'source_sha256': source_hash,
+            'plan_fingerprint': fingerprint, 'document': document, 'blocks': blocks, 'source_url': source_url}
 
 
 def copy_paragraph(block):
@@ -298,7 +316,7 @@ def migrate(client, job, state_path):
         old = json.loads(state_path.read_text())
         if (old.get('schema') == STATE_SCHEMA and old.get('task') == plan['task']
                 and old.get('workspace') == client.workspace and old.get('source_sha256') == plan['source_sha256']
-                and old.get('verified')):
+                and old.get('plan_fingerprint') == plan['plan_fingerprint'] and old.get('verified')):
             return old
         raise ValueError('Existing or partial state requires inspection; no requests repeated')
     page = client.page(plan['task'])
@@ -318,7 +336,8 @@ def migrate(client, job, state_path):
     log_index = next(i for i, b in enumerate(plan['blocks']) if b['type'] == 'heading_2' and plain(b) == 'Work log')
     plan['blocks'][log_index:log_index] = extras
     state = {'schema': STATE_SCHEMA, 'workspace': client.workspace, 'task': plan['task'],
-             'source_sha256': plan['source_sha256'], 'before_page': page, 'before_blocks': old_blocks,
+             'source_sha256': plan['source_sha256'], 'plan_fingerprint': plan['plan_fingerprint'],
+             'task_title': source_title(page), 'before_page': page, 'before_blocks': old_blocks,
              'before_comments': old_comments, 'warnings': plan['document']['warnings'],
              'uploads': [], 'actions': [], 'created_blocks': [], 'removed_blocks': [], 'verified': False}
     def save():
@@ -423,7 +442,7 @@ def migrate(client, job, state_path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__, epilog='Job JSON: source, task, optional purpose, links, terms, forbid_words, action_titles. Use an object or an explicit list of objects. Keep jobs/state outside the checkout. Default is offline dry-run; --apply performs writes. Partial state stops reruns for manual recovery. Native comments require a separate source connection.')
+    parser = argparse.ArgumentParser(description=__doc__, epilog='Job JSON: source, task, optional purpose, links, terms, forbid_words, action_titles. Use an object or an explicit list of objects. Keep jobs/state outside the checkout. Default is offline dry-run; --apply performs writes. Partial or changed state stops reruns for manual recovery. Supports up to 25 direct actions, PNG/text uploads below 5 MB, and native API block limits. Native comments require a separate source connection.')
     parser.add_argument('--job', type=Path, required=True, help='Private JSON job or explicit job list')
     parser.add_argument('--workspace', default=os.environ.get('NOTION_WORKSPACE_ID'))
     parser.add_argument('--state-dir', type=Path, help='Private, external directory for backups and operation journals')
