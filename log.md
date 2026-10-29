@@ -52,3 +52,8 @@ Append a brief entry after an LLM operation changes the wiki. Record what change
 
 - Moved the [checker](.agents/skills/holotape-check/scripts/check_vault.py) and its [tests](.agents/skills/holotape-check/tests/test_check_vault.py) under the [vault-check skill](.agents/skills/holotape-check/SKILL.md); updated [Home](HOME.md), the [agent guide](AGENTS.md), and the [index](index.md) with the new command path.
 - Review: the skill still uses the same prototype checks and does not replace Obsidian Linter or runtime validation.
+
+## [2026-10-29] maintain | preserve Notion task migration tooling
+
+- Saved the reusable [export parser](scripts/notion_markdown.py), [migration CLI](scripts/notion_migrate.py), and offline [parser](scripts/tests/test_notion_migration.py) and [client](scripts/tests/test_notion_client.py) tests. Completed the remaining approved-scope Notion task imports and metadata-only cleanup, preserving task properties and explicit source actions. Private exports, credentials, and migration state were not added to this vault.
+- Review: native comment threads are not included in Markdown exports. Credential-bearing download details were omitted; unresolved source dates, historical questions, and current ownership still need human confirmation. Migration does not approve source proposals or verify historical progress as current.
